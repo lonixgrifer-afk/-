@@ -130,6 +130,110 @@ class Database:
         self.conn.commit()
         return row
 
+class Database:
+            if referrer_id and referrer_id != user_id:
+                cur.execute("UPDATE users SET balance = balance + 0.1 WHERE user_id=?", (referrer_id,))
+        self.conn.commit()
+
+    def log_action(self, user_id: int, username: str | None, action: str, details: str | None = None):
+        self.conn.execute(
+            "INSERT INTO action_logs(user_id, username, action, details, created_at) VALUES (?, ?, ?, ?, ?)",
+            (user_id, username, action, details, self._now()),
+        )
+        self.conn.commit()
+
+    def add_link(self, url: str):
+        self.conn.execute("INSERT INTO links(url, created_at) VALUES (?, ?)", (url, self._now()))
+        self.conn.commit()
+
+    def take_link(self, user_id: int):
+        cur = self.conn.cursor()
+        cur.execute("SELECT id, url FROM links WHERE status='available' ORDER BY id LIMIT 1")
+        row = cur.fetchone()
+        if not row:
+            return None
+        cur.execute("UPDATE links SET status='taken', taken_by=?, taken_at=? WHERE id=?", (user_id, self._now(), row["id"]))
+        self.conn.commit()
+        return row
+
+class Database:
+            if referrer_id and referrer_id != user_id:
+                cur.execute("UPDATE users SET balance = balance + 0.1 WHERE user_id=?", (referrer_id,))
+        self.conn.commit()
+
+    def log_action(self, user_id: int, username: str | None, action: str, details: str | None = None):
+        self.conn.execute(
+            "INSERT INTO action_logs(user_id, username, action, details, created_at) VALUES (?, ?, ?, ?, ?)",
+            (user_id, username, action, details, self._now()),
+        )
+        self.conn.commit()
+
+    def add_link(self, url: str):
+        self.conn.execute("INSERT INTO links(url, created_at) VALUES (?, ?)", (url, self._now()))
+        self.conn.commit()
+
+    def take_link(self, user_id: int):
+        cur = self.conn.cursor()
+        cur.execute("SELECT id, url FROM links WHERE status='available' ORDER BY id LIMIT 1")
+        row = cur.fetchone()
+        if not row:
+            return None
+        cur.execute("UPDATE links SET status='taken', taken_by=?, taken_at=? WHERE id=?", (user_id, self._now(), row["id"]))
+        self.conn.commit()
+        return row
+
+class Database:
+            if referrer_id and referrer_id != user_id:
+                cur.execute("UPDATE users SET balance = balance + 0.1 WHERE user_id=?", (referrer_id,))
+        self.conn.commit()
+
+    def log_action(self, user_id: int, username: str | None, action: str, details: str | None = None):
+        self.conn.execute(
+            "INSERT INTO action_logs(user_id, username, action, details, created_at) VALUES (?, ?, ?, ?, ?)",
+            (user_id, username, action, details, self._now()),
+        )
+        self.conn.commit()
+
+    def add_link(self, url: str):
+        self.conn.execute("INSERT INTO links(url, created_at) VALUES (?, ?)", (url, self._now()))
+        self.conn.commit()
+
+    def take_link(self, user_id: int):
+        cur = self.conn.cursor()
+        cur.execute("SELECT id, url FROM links WHERE status='available' ORDER BY id LIMIT 1")
+        row = cur.fetchone()
+        if not row:
+            return None
+        cur.execute("UPDATE links SET status='taken', taken_by=?, taken_at=? WHERE id=?", (user_id, self._now(), row["id"]))
+        self.conn.commit()
+        return row
+
+
+    def delete_all_links(self) -> int:
+        cur = self.conn.cursor()
+        cur.execute("DELETE FROM links")
+        self.conn.commit()
+        return cur.rowcount
+
+    def delete_links_by_ids(self, ids: list[int]) -> int:
+        if not ids:
+            return 0
+        placeholders = ",".join("?" for _ in ids)
+        cur = self.conn.cursor()
+        cur.execute(f"DELETE FROM links WHERE id IN ({placeholders})", ids)
+        self.conn.commit()
+        return cur.rowcount
+
+    def add_balance(self, user_id: int, amount: float) -> bool:
+        cur = self.conn.cursor()
+        cur.execute("SELECT user_id FROM users WHERE user_id=?", (user_id,))
+        if not cur.fetchone():
+            return False
+        cur.execute("UPDATE users SET balance = balance + ? WHERE user_id=?", (amount, user_id))
+        self.conn.commit()
+        return True
+     
+
     def recent_taken_links(self, limit: int = 20):
         cur = self.conn.cursor()
         cur.execute(
@@ -261,7 +365,6 @@ def user_kb() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="💸 Вывод"), KeyboardButton(text="👥 Реферал")],
             [KeyboardButton(text="📊 Стата"), KeyboardButton(text="⚠️ Служба поддержки ⚠️")],
             [KeyboardButton(text="🔐 Админ-панель")],
-            [KeyboardButton(text=MAIN_MENU_TEXT)],
         ],
         resize_keyboard=True,
     )
@@ -272,8 +375,8 @@ def admin_kb() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text="➕ Добавить ссылку"), KeyboardButton(text="📦 Взятые ссылки")],
             [KeyboardButton(text="🖼 Загрузить стату"), KeyboardButton(text="✅ Обработать вывод")],
+            [KeyboardButton(text="➕ Пополнить баланс"), KeyboardButton(text="🧹 Чистка ссылок")],
             [KeyboardButton(text="💬 Ответить поддержке"), KeyboardButton(text="🧾 Логи пользователя")],
-            [KeyboardButton(text=MAIN_MENU_TEXT)],
         ],
         resize_keyboard=True,
     )
@@ -285,6 +388,8 @@ class AdminStates(StatesGroup):
     process_withdrawal = State()
     answer_support = State()
     view_logs = State()
+    clean_links_specific = State()
+    topup_balance = State()
 
 
 class UserStates(StatesGroup):
@@ -606,6 +711,95 @@ async def admin_complete_withdraw(message: Message, state: FSMContext, bot: Bot)
         await message.answer("Оставшиеся заявки:", reply_markup=pending_withdrawals_kb(rows))
     else:
         await message.answer("Все заявки обработаны, список пуст.")
+
+
+@dp.message(F.text == "🧹 Чистка ссылок")
+async def admin_links_cleanup_menu(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    await message.answer("Выберите режим чистки ссылок:", reply_markup=links_cleanup_kb())
+
+
+@dp.callback_query(F.data == "links_clean:all")
+async def admin_links_cleanup_all(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    deleted = db.delete_all_links()
+    db.log_action(callback.from_user.id, callback.from_user.username, "admin_clean_links_all", f"deleted={deleted}")
+    await callback.answer("Готово")
+    if callback.message:
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.message.answer(f"Удалено ссылок: {deleted}.", reply_markup=admin_kb())
+
+
+@dp.callback_query(F.data == "links_clean:specific")
+async def admin_links_cleanup_specific_start(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await state.set_state(AdminStates.clean_links_specific)
+    await callback.answer()
+    if callback.message:
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.message.answer("Отправьте ID ссылок через запятую (например: 1,2,15).")
+
+
+@dp.message(AdminStates.clean_links_specific)
+async def admin_links_cleanup_specific_apply(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    raw = (message.text or "").replace(" ", "")
+    parts = [x for x in raw.split(",") if x]
+    if not parts or any(not x.isdigit() for x in parts):
+        await message.answer("Неверный формат. Пример: 1,2,15")
+        return
+    ids = [int(x) for x in parts]
+    deleted = db.delete_links_by_ids(ids)
+    db.log_action(message.from_user.id, message.from_user.username, "admin_clean_links_specific", f"ids={ids} deleted={deleted}")
+    await state.clear()
+    await message.answer(f"Удалено ссылок: {deleted}.", reply_markup=admin_kb())
+
+
+@dp.message(F.text == "➕ Пополнить баланс")
+async def admin_topup_balance_start(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    await state.set_state(AdminStates.topup_balance)
+    await message.answer("Введите в формате user_id|сумма (например: 123456|10.5)")
+
+
+@dp.message(AdminStates.topup_balance)
+async def admin_topup_balance_apply(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    text = (message.text or "").strip()
+    if "|" not in text:
+        await message.answer("Формат: user_id|сумма")
+        return
+    left, right = text.split("|", 1)
+    left, right = left.strip(), right.strip().replace(",", ".")
+    if not left.isdigit():
+        await message.answer("user_id должен быть числом")
+        return
+    try:
+        amount = float(right)
+    except ValueError:
+        await message.answer("Сумма должна быть числом")
+        return
+    if amount <= 0:
+        await message.answer("Сумма должна быть больше 0")
+        return
+
+    user_id = int(left)
+    ok = db.add_balance(user_id, amount)
+    if not ok:
+        await message.answer("Пользователь не найден. Пусть сначала запустит бота через /start")
+        return
+
+    db.log_action(message.from_user.id, message.from_user.username, "admin_topup_balance", f"user_id={user_id} amount={amount}")
+    await state.clear()
+    await message.answer(f"Баланс пользователя {user_id} пополнен на {amount:.2f}$", reply_markup=admin_kb())
 
 
 @dp.message(StateFilter("*"), F.text == "🔐 Админ-панель")

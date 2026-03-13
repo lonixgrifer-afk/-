@@ -2,7 +2,7 @@ import asyncio
 import os
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher, F
@@ -14,6 +14,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 BOT_TOKEN = "8646126772:AAGtZPWMPq-1WVP9POpceYgXGHATOduo6Ts"
 ADMIN = [6777718761]  # пример: [123456789, 987654321]
 MAIN_MENU_TEXT = "⬅️ Главное меню"
+LINK_COOLDOWN_SECONDS = 3600
 
 
 @dataclass
@@ -88,6 +89,12 @@ class Database:
             );
             """
         )
+
+        cur.execute("PRAGMA table_info(users)")
+        user_columns = {row[1] for row in cur.fetchall()}
+        if "last_link_taken_at" not in user_columns:
+            cur.execute("ALTER TABLE users ADD COLUMN last_link_taken_at TEXT")
+
         self.conn.commit()
 
     @staticmethod
@@ -137,15 +144,36 @@ class Database:
         self.conn.commit()
         return cur.rowcount or 0
 
+    def get_link_cooldown_remaining(self, user_id: int, cooldown_seconds: int = LINK_COOLDOWN_SECONDS) -> int:
+        cur = self.conn.cursor()
+        cur.execute("SELECT last_link_taken_at FROM users WHERE user_id=?", (user_id,))
+        row = cur.fetchone()
+        if not row or not row["last_link_taken_at"]:
+            return 0
+        try:
+            last_taken = datetime.fromisoformat(row["last_link_taken_at"])
+        except ValueError:
+            return 0
+        available_at = last_taken + timedelta(seconds=cooldown_seconds)
+        remaining = int((available_at - datetime.utcnow()).total_seconds())
+        return max(0, remaining)
+
     def take_link(self, user_id: int):
+        cooldown_remaining = self.get_link_cooldown_remaining(user_id)
+        if cooldown_remaining > 0:
+            return {"status": "cooldown", "remaining_seconds": cooldown_remaining}
+
         cur = self.conn.cursor()
         cur.execute("SELECT id, url FROM links WHERE status='available' ORDER BY id LIMIT 1")
         row = cur.fetchone()
         if not row:
-            return None
-        cur.execute("UPDATE links SET status='taken', taken_by=?, taken_at=? WHERE id=?", (user_id, self._now(), row["id"]))
+            return {"status": "no_links"}
+
+        now = self._now()
+        cur.execute("UPDATE links SET status='taken', taken_by=?, taken_at=? WHERE id=?", (user_id, now, row["id"]))
+        cur.execute("UPDATE users SET last_link_taken_at=? WHERE user_id=?", (now, user_id))
         self.conn.commit()
-        return row
+        return {"status": "ok", "link": row}
 
     def recent_taken_links(self, limit: int = 20):
         cur = self.conn.cursor()
@@ -379,11 +407,28 @@ async def start(message: Message):
 @dp.message(F.text == "🔗 Взять ссылку")
 async def take_link(message: Message):
     db.upsert_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
-    link = db.take_link(message.from_user.id)
-    db.log_action(message.from_user.id, message.from_user.username, "take_link")
-    if not link:
+    result = db.take_link(message.from_user.id)
+
+    if result["status"] == "cooldown":
+        mins, secs = divmod(result["remaining_seconds"], 60)
+        hours, mins = divmod(mins, 60)
+        wait_text = f"{hours:02d}:{mins:02d}:{secs:02d}"
+        db.log_action(
+            message.from_user.id,
+            message.from_user.username,
+            "take_link_cooldown",
+            f"remaining={result['remaining_seconds']}",
+        )
+        await message.answer(f"⏳ Новую ссылку можно взять только через {wait_text}.")
+        return
+
+    if result["status"] == "no_links":
+        db.log_action(message.from_user.id, message.from_user.username, "take_link_no_links")
         await message.answer("Пока нет доступных ссылок.")
         return
+
+    link = result["link"]
+    db.log_action(message.from_user.id, message.from_user.username, "take_link", f"link_id={link['id']}")
     await message.answer(f"Ваша ссылка #{link['id']}: {link['url']}")
 
 
@@ -460,11 +505,16 @@ async def withdraw_amount(message: Message, state: FSMContext):
     if amount <= 0 or amount > balance:
         await message.answer(f"Недостаточно баланса. Доступно: {balance:.2f}$")
         return
-    db.create_withdrawal(message.from_user.id, amount)
+
+    # Списание средств с баланса
+    db.add_balance(message.from_user.id, -amount)  # Это списывает деньги с баланса пользователя
+    
+    db.create_withdrawal(message.from_user.id, amount)  # Создание заявки на вывод
     db.log_action(message.from_user.id, message.from_user.username, "withdraw_request", f"amount={amount}")
+    
     await state.clear()
     await message.answer("Заявка на вывод создана. Ожидайте подтверждения администратора.")
-
+    
 
 @dp.message(F.text == "⚠️ Служба поддержки ⚠️")
 async def support_start(message: Message, state: FSMContext):

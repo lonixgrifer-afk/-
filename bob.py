@@ -12,7 +12,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, Message, ReplyKeyboardMarkup
 
 BOT_TOKEN = "8646126772:AAGtZPWMPq-1WVP9POpceYgXGHATOduo6Ts"
-ADMIN = [6777718761]  # пример: [123456789, 987654321]
+ADMIN = [8203556349]  # пример: [123456789, 987654321]
 MAIN_MENU_TEXT = "⬅️ Главное меню"
 LINK_COOLDOWN_SECONDS = 3600
 
@@ -208,7 +208,7 @@ class Database:
         cur = self.conn.cursor()
         cur.execute(
             """
-            SELECT w.id, w.user_id, w.amount, u.username
+            SELECT w.id, w.user_id, w.amount, u.username, u.first_name
             FROM withdrawals w
             LEFT JOIN users u ON u.user_id=w.user_id
             WHERE w.status='pending'
@@ -221,7 +221,7 @@ class Database:
         cur = self.conn.cursor()
         cur.execute(
             """
-            SELECT w.id, w.user_id, w.amount, u.username
+            SELECT w.id, w.user_id, w.amount, u.username, u.first_name
             FROM withdrawals w
             LEFT JOIN users u ON u.user_id=w.user_id
             WHERE w.status='pending' AND w.id=?
@@ -296,6 +296,32 @@ class Database:
         )
         return cur.fetchall()
 
+    def recent_active_users(self, limit: int = 10):
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            SELECT al.user_id,
+                   COALESCE(u.username, al.username) AS username,
+                   MAX(al.id) AS last_log_id,
+                   MAX(al.created_at) AS last_action_at
+            FROM action_logs al
+            LEFT JOIN users u ON u.user_id = al.user_id
+            GROUP BY al.user_id
+            ORDER BY last_log_id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        return cur.fetchall()
+
+    def all_user_actions(self, user_id: int):
+        cur = self.conn.cursor()
+        cur.execute(
+            "SELECT action, details, created_at FROM action_logs WHERE user_id=? ORDER BY id DESC",
+            (user_id,),
+        )
+        return cur.fetchall()
+
 
 def load_settings() -> Settings:
     if not BOT_TOKEN:
@@ -357,11 +383,25 @@ def pending_withdrawals_kb(rows) -> InlineKeyboardMarkup:
     buttons = [
         [
             InlineKeyboardButton(
-                text=f"#{r['id']} | @{r['username'] or '-'} | {r['amount']}$",
+                text=f"{idx}. @{r['username'] or r['first_name'] or '-'} — {r['amount']}$",
                 callback_data=f"withdraw_pick:{r['id']}",
             )
         ]
-        for r in rows
+        for idx, r in enumerate(rows, start=1)
+    ]
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="back:admin")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def logs_users_kb(rows) -> InlineKeyboardMarkup:
+    buttons = [
+        [
+            InlineKeyboardButton(
+                text=f"{idx}. @{r['username'] or '-'} (id:{r['user_id']})",
+                callback_data=f"logs_user:{r['user_id']}",
+            )
+        ]
+        for idx, r in enumerate(rows, start=1)
     ]
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="back:admin")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -456,6 +496,7 @@ async def referral(message: Message, bot: Bot):
 
 @dp.message(F.text == "💸 Вывод")
 async def withdraw_start(message: Message, state: FSMContext):
+    db.upsert_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
     balance = db.get_balance(message.from_user.id)
     db.log_action(message.from_user.id, message.from_user.username, "withdraw_open", f"balance={balance}")
     await state.set_state(UserStates.withdraw_amount)
@@ -507,8 +548,9 @@ async def withdraw_amount(message: Message, state: FSMContext):
         return
 
     # Списание средств с баланса
+    db.upsert_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
     db.add_balance(message.from_user.id, -amount)  # Это списывает деньги с баланса пользователя
-    
+
     db.create_withdrawal(message.from_user.id, amount)  # Создание заявки на вывод
     db.log_action(message.from_user.id, message.from_user.username, "withdraw_request", f"amount={amount}")
     
@@ -856,26 +898,49 @@ async def admin_support_answer(message: Message, state: FSMContext, bot: Bot):
 async def admin_logs_start(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         return
-    await state.set_state(AdminStates.view_logs)
-    await message.answer("Введите user_id для просмотра действий.")
-
-
-@dp.message(AdminStates.view_logs)
-async def admin_logs_show(message: Message, state: FSMContext):
-    if not is_admin(message.from_user.id):
-        return
-    if not message.text.strip().isdigit():
-        await message.answer("Нужен числовой user_id")
-        return
-    rows = db.user_actions(int(message.text.strip()))
+    await state.clear()
+    rows = db.recent_active_users(limit=10)
     if not rows:
         await message.answer("Логи пустые.")
-    else:
-        lines = ["Последние действия пользователя:"]
-        for r in rows:
-            lines.append(f"{r['created_at']} | {r['action']} | {r['details'] or '-'}")
-        await message.answer("\n".join(lines))
-    await state.clear()
+        return
+    await message.answer("Последние 10 активных пользователей:", reply_markup=logs_users_kb(rows))
+
+
+@dp.callback_query(F.data.startswith("logs_user:"))
+async def admin_logs_show(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    user_id = int(callback.data.split(":", 1)[1])
+    rows = db.all_user_actions(user_id)
+    await callback.answer()
+
+    if not rows:
+        if callback.message:
+            await callback.message.answer("Логи пустые.")
+        return
+
+    lines = [f"Логи пользователя {user_id}:"]
+    for r in rows:
+        lines.append(f"{r['created_at']} | {r['action']} | {r['details'] or '-'}")
+    text = "\n".join(lines)
+
+    if callback.message:
+        if len(text) <= 4000:
+            await callback.message.answer(text, reply_markup=back_inline_kb("admin"))
+            return
+
+        chunk = ""
+        for line in lines:
+            piece = f"{line}\n"
+            if len(chunk) + len(piece) > 3900:
+                await callback.message.answer(chunk)
+                chunk = piece
+            else:
+                chunk += piece
+        if chunk:
+            await callback.message.answer(chunk, reply_markup=back_inline_kb("admin"))
 
 
 async def main():
